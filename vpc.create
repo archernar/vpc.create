@@ -19,10 +19,10 @@ FLEETHOME=/etc/mdisks/scm/fleet
 PEMS=$FLEETHOME/PEMS
 
 SCR=$(echo "$0" | gawk '{n=split($0, a, "/"); print a[n];}')
-ACCOUNT="ADM"
+ACCOUNT=$ACCOUNTLOCAL
+CIDR=$CIDRLOCAL
 SPOTAZ="us-east-1b"
 REGION="us-east-1"
-CIDR=$CIDRLOCAL
 # https://aws.amazon.com/blogs/aws/new-graviton2-instance-types-c6g-r6g-and-their-d-variant/
 SPOTIT="c6g.2xlarge"
 SPOTPR=".9500"

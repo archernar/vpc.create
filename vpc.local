@@ -1,4 +1,6 @@
 CIDRLOCAL="X.X.X.X/32"
+ACCOUNTLOCAL=SOMEAWSACCOUT
+
 
 customsetup() {
 }
