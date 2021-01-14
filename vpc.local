@@ -1,0 +1,8 @@
+CIDRLOCAL="X.X.X.X/32"
+
+customsetup() {
+}
+
+
+customtest() {
+}

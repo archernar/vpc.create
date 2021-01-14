@@ -1,0 +1,348 @@
+#!/bin/bash
+Tmp="/tmp/$$"
+Tmp1="/tmp/$$_$$"
+Tmp2="/tmp/$$_$$_$$"
+Tmp3="/tmp/$$_$$_$$_$$"
+Tmp4="/tmp/$$_$$_$$_$$_$$"
+trap 'rm -f "$Tmp $Tmp1 $Tmp2 $Tmp3 $Tmp4" >/dev/null 2>&1;' 0
+trap "exit 2" 1 2 3 13 15
+rm $Tmp  >/dev/null 2>&1
+rm $Tmp1  >/dev/null 2>&1
+rm $Tmp2  >/dev/null 2>&1
+rm $Tmp3  >/dev/null 2>&1
+rm $Tmp4  >/dev/null 2>&1
+
+source fleet.bash
+source vpc.local
+
+FLEETHOME=/etc/mdisks/scm/fleet
+PEMS=$FLEETHOME/PEMS
+
+SCR=$(echo "$0" | gawk '{n=split($0, a, "/"); print a[n];}')
+ACCOUNT="ADM"
+SPOTAZ="us-east-1b"
+REGION="us-east-1"
+CIDR=$CIDRLOCAL
+# https://aws.amazon.com/blogs/aws/new-graviton2-instance-types-c6g-r6g-and-their-d-variant/
+SPOTIT="c6g.2xlarge"
+SPOTPR=".9500"
+SPOTAMI="ami-0d221091ef7082bcf"
+FTAG="UTILAUTO"
+SGNAME="$FTAG"`cat /dev/urandom | tr -cd 'a-f0-9' | head -c 12`
+SGDUMMYNAME="$FTAG"`cat /dev/urandom | tr -cd 'a-f0-9' | head -c 12`
+KEYNAME="$FTAG"`cat /dev/urandom | tr -cd 'a-f0-9' | head -c 12`
+
+AWS="aws --profile $ACCOUNT --output text "
+AWSJ="aws --profile $ACCOUNT --output json "
+
+while getopts "lhiscdktax" arg
+do
+    case $arg in
+        h)
+            echo "-i   Create spot instance"
+            echo "-k   Terminate spot instance"
+            echo "-s   Init disk and deploy software"
+            echo "-c   Create VPC and associated resources"
+            echo "-d   Delete VPC and associated resources"
+            echo "-t   SSH to the instance"
+            ;;
+        a)
+            FLDS="ID:InstanceId,IP:PublicIpAddress,ST:State.Name"
+                     SPOTREQID=$(bib -n SPOTREQID -g)
+                     # $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "Reservations[*].Instances[*].{$FLDS}" 
+                     $AWSJ ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID  
+                     $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].Status.Code" 
+                     $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].InstanceId" 
+                     $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].ActualBlockHourlyPrice" 
+                     $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].CreateTime" 
+                     ;;
+        l)
+            echo "VPCs"
+            $AWS ec2 describe-vpcs  --query "Vpcs[*].[VpcId,CidrBlock]" | column -t
+            echo "Instances"
+            FLDS="ID:InstanceId,IP:PublicIpAddress,ST:State.Name"
+            $AWS ec2 describe-instances --filters Name=tag:Name,Values=FleetAuto --query "Reservations[*].Instances[*].{$FLDS}" | column -t
+            echo "Spot Requests"
+            SPOTREQID=$(bib -n SPOTREQID -g)
+            if [[ "$SPOTREQID" != "NULL" ]]; then
+                $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].Status.Code" 
+                $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].InstanceId" 
+                $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].ActualBlockHourlyPrice" 
+                $AWS ec2 describe-spot-instance-requests --spot-instance-request-ids $SPOTREQID --query "SpotInstanceRequests[*].CreateTime" 
+            fi
+            ;;
+        s)
+                     dnsinit
+                     IP=$(bib -n IP -g)
+                     IID=$(bib -n IID -g)
+                     KEYFILE=$(bib -n KEYFILE -g)
+                     SGNAME=$(bib -n SGNAME -g)
+                     UNAME=$(bib -n UNAME -g)
+
+                     $AWS ec2 modify-instance-attribute --instance-id $IID --groups "$SGNAME" 
+                     DISK="/dev/nvme1n1p1"
+                     CMD="sudo mount $DISK /home/$UNAME/disk"
+                         sshdo "sudo apt-get -y update"
+                         sshdo "sudo apt-get -y upgrade"
+                         sshdo "sudo apt-get -y install g++"
+
+                         ssh $UNAME@$IP -o StrictHostKeyChecking=no -i  $KEYFILE df > $Tmp 
+                         SZ=$(cat $Tmp | gawk '/nvme1n1p1/ { print $0 }')
+                         logmsg "SZ" "$SZ"
+                         if [[ "$SZ" = "" ]]; then
+                             sshdo "sudo ls /home/$UNAME | egrep ^disk$"
+                             echo "nvme"
+                             scpdo disk.cfg /home/$UNAME/disk.cfg
+                             sshdo "sudo chmod u+rwx,g+rwx,o-rwx  /home/$UNAME/disk.cfg"
+                             sshdo "sudo sfdisk /dev/nvme1n1 < /home/$UNAME/disk.cfg"
+                             sshdo "sudo mkfs -t ext4 $DISK"
+                             sshdo "sudo mkdir -p /home/$UNAME/disk"
+                             sshdo "sudo mount -t ext4 -o defaults,noiversion,auto_da_alloc,noatime,errors=remount-ro,commit=20,inode_readahead_blks=32,delalloc,barrier=0 $DISK /home/$UNAME/disk"
+                             sshdo "sudo chown $UNAME:$UNAME  /home/$UNAME/disk"
+                             sshdo "sudo chmod u+rwx,g+rwx,o-rwx  /home/$UNAME/disk"
+                         else
+                             logmsg "DISK EXISTS" 
+                         fi
+
+                         customsetup
+                         ;;
+        x)
+                         dnsinit
+                         customtest
+                         ;;
+           
+ 
+        t)
+            dnsinit
+            IP=$(bib -n IP -g)
+            IID=$(bib -n IID -g)
+            KEYFILE=$(bib -n KEYFILE -g)
+            SGNAME=$(bib -n SGNAME -g)
+            UNAME=$(bib -n UNAME -g)
+            $AWS ec2 modify-instance-attribute --instance-id $IID --groups "$SGNAME" 
+            ssh -i  $KEYFILE $UNAME@$IP
+            ;;
+        k)
+            dnsinit
+            IID=$(bib -n IID -g)
+            SGDUMMY=$(bib -n SGDUMMY -g)
+            $AWS ec2 modify-instance-attribute --instance-id $IID --groups "$SGDUMMY" 
+            aws --profile $ACCOUNT ec2 terminate-instances --instance-ids $IID
+            ;;
+        c)
+            VPCID=$(bib -n VPCID -g)
+            logmsg "VVV" "$VPCID"
+            if [[ "$VPCID" = "NULL" ]]; then
+                logmsg "--" "--"
+                logmsg "--" "--"
+                logmsg "VPC Create Start"
+                # --------------------------------------
+                VPCID=`$AWS   ec2 create-vpc            --cidr-block 10.0.0.0/16 --query "Vpc.VpcId"`
+                logmsg "VPC Create" "$VPCID"
+                bib -n VPCID -v $VPCID -p
+                
+                logmsg "Subnet Create";
+                # --------------------------------------
+                SUBNET1=`$AWS ec2 create-subnet  --vpc-id $VPCID \
+                                                 --cidr-block 10.0.0.0/24 --availability-zone $SPOTAZ --query "Subnet.SubnetId"`
+                logmsg "Subnet Create" "$SUBNET1"
+                bib -n SUBNET1 -v $SUBNET1 -p
+                
+                logmsg "Internet Gateway Create"
+                # --------------------------------------
+                IGWID=`$AWS   ec2 create-internet-gateway --query "InternetGateway.InternetGatewayId"`
+                $AWS          ec2 attach-internet-gateway --vpc-id $VPCID --internet-gateway-id $IGWID > $Tmp
+                logmsg "IG" "$IGWID"
+                bib -n IGWID -v $IGWID -p
+                
+                logmsg "Route Table Create"
+                # --------------------------------------
+                THIS=`$AWS    ec2 create-route-table      --vpc-id $VPCID --query "RouteTable.RouteTableId"`
+                $AWS          ec2 create-route            --route-table-id $THIS --destination-cidr-block 0.0.0.0/0 --gateway-id $IGWID > $Tmp
+                ASSID=`$AWS   ec2 associate-route-table   --subnet-id $SUBNET1 --route-table-id $THIS --query "AssociationId"`
+                logmsg "RT"       "$THIS"
+                logmsg "Assoc ID" "$ASSID"
+                bib -n RT -v $THIS -p
+                bib -n ASSID -v $ASSID -p
+                
+                $AWS ec2 modify-subnet-attribute --subnet-id $SUBNET1 --map-public-ip-on-launch > $Tmp
+                
+            #   SZ=$($AWS ec2 describe-security-groups | grep $FTAG | wc -l)
+            #   if [[ "$SZ" = "0" ]]; then
+                    $AWS ec2 create-security-group --group-name $SGDUMMYNAME \
+                                                   --description "$SGDUMMYNAME" \
+                                                   --vpc-id $VPCID > $Tmp
+                    SGDUMMY=`cat $Tmp`
+                    bib -n SGDUMMY -v $SGDUMMY -p
+                    logmsg "SGDUMMY" "$SGDUMMY"
+
+                    $AWS ec2 create-security-group --group-name $SGNAME \
+                                                   --description "$SGNAME" \
+                                                   --vpc-id $VPCID > $Tmp
+                    SGNAME=`cat $Tmp`
+                    bib -n SGNAME -v $SGNAME -p
+                    logmsg "SGNAME" "$SGNAME"
+
+                    AWSINGRESS="aws --profile $ACCOUNT ec2 authorize-security-group-ingress "
+                    logmsg "INGRESS" "$CIDR"
+                    logmsg "INGRESS" "$SGNAME"
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 20   --cidr $CIDR
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 21   --cidr $CIDR
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 22   --cidr $CIDR
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 2181 --cidr $CIDR
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 9082 --cidr $CIDR
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 22   --source-group $SGNAME
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 2181 --source-group $SGNAME
+                    $AWSINGRESS --group-id $SGNAME --protocol tcp --port 9092 --source-group $SGNAME
+             #  fi
+
+                logmsg "Key Pair Create"
+                # --------------------------------------
+                SZ=$($AWS ec2 describe-key-pairs | gawk -v rx="$FTAG" '($3 ~ ("^" rx)) { print $3 }'| wc -l)
+                if [[ "$SZ" = "0" ]]; then
+                    aws --profile $ACCOUNT  ec2 create-key-pair --key-name $KEYNAME  > $Tmp
+                                gawk   '/BEGIN RSA/ {
+                                           print "-----BEGIN RSA PRIVATE KEY-----"
+                                           next
+                                       }
+                                       /END RSA/ {
+                                           print "-----END RSA PRIVATE KEY-----"
+                                           next
+                                       }
+                                       {
+                                           print $0
+                                       }' $Tmp > $PEMS/$KEYNAME.pem
+
+                    rm -f  $Tmp >/dev/null 2>&1
+                    KEYFILE="$PEMS/$KEYNAME.pem"
+                    chmod 400   $PEMS/$KEYNAME.pem
+                    logmsg "KEYNAME Create" "$KEYNAME"
+                    logmsg "KEYFILE Create" "$PEMS/$KEYNAME.pem"
+                    bib -n KEYNAME -v $KEYNAME -p
+                    bib -n KEYFILE -v $KEYFILE -p
+                fi
+                 logmsg "VPC Create End"
+            else
+                 logmsg "VPC Already Exists"
+            fi
+
+            ;;
+
+        i)
+            #   ------------------------------------------
+            #   - Build Spot Instance Template
+            #   ------------------------------------------
+
+            SUBNET1=$(bib -n SUBNET1 -g)
+            SGDUMMY=$(bib -n SGDUMMY -g)
+            KEYNAME=$(bib -n KEYNAME -g)
+            KEYFILE=$(bib -n KEYFILE -g)
+
+cat <<-ENDOFMESSAGE > specification.json
+            {
+              "ImageId": "$SPOTAMI",
+              "BlockDeviceMappings": [
+               {
+                "DeviceName": "/dev/xvdb", 
+                "Ebs": {
+                    "Encrypted": false, 
+                    "DeleteOnTermination": true, 
+                    "VolumeType": "gp2", 
+                    "VolumeSize": 40 
+                }
+               }
+              ], 
+              "KeyName": "ACTUAL-KEYNAME",
+              "InstanceType": "$SPOTIT",
+              "NetworkInterfaces": [
+                {
+                  "DeviceIndex": 0,
+                  "SubnetId": "$SUBNET1",
+                  "Groups": [ "ACTUAL-SGID" ],
+                  "AssociatePublicIpAddress": true
+                }
+              ]
+            }
+ENDOFMESSAGE
+            cp specification.json $Tmp; cat $Tmp | sed "s/ACTUAL-SGID/$SGDUMMY/g" > specification.json
+            cp specification.json $Tmp; cat $Tmp | sed "s/ACTUAL-KEYNAME/$KEYNAME/g" > specification.json
+            rm -f "$Tmp" >/dev/null 2>&1
+            
+            #   ==============================================================================
+            #   - Request Spot Instance
+            #   ------------------------------------------
+            rm -rf spot.request
+            aws --profile $ACCOUNT --output json ec2 request-spot-instances \
+                                   --spot-price "$SPOTPR" \
+                                   --instance-count 1 \
+                                   --type "one-time" \
+                                   --block-duration-minutes 60 \
+                                   --launch-specification file://specification.json  | tee spot.request
+            SPOTREQID=$(grep SpotInstanceRequestId spot.request | gawk '{ sub(/^.*sir-/,"sir-",$0); sub(/",/,"",$0);print $0}')
+            bib -n SPOTREQID -v $SPOTREQID -p
+
+            logmsg "Spot Request Submitted"
+            ;;
+
+        d)
+            logmsg "--" "--"
+            logmsg "VPC Delete Start"
+            # --------------------------------------
+            VPCID=$(bib -n VPCID -g)
+            IGWID=$(bib -n IGWID -g)
+            SGDUMMY=$(bib -n SGDUMMY -g)
+            SGNAME=$(bib -n SGNAME -g)
+
+            logmsg "VPC Delete" "$VPCID"
+            logmsg "IG"         "$IGWID"
+            IGWID=`$AWS ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPCID" --query "InternetGateways[].InternetGatewayId"`
+            logmsg "IG Delete" "$IGWID"
+            RTLIST=`$AWS ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPCID" "Name=association.main,Values=false" --query "RouteTables[].RouteTableId"`
+            logmsg "RT Delete" "$RTLIST"
+
+            LIST=`$AWS ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPCID" --query "SecurityGroups[].GroupId"`
+            for ITEM in $LIST; do
+                $AWSJ --region $REGION ec2 delete-security-group --group-id $ITEM >/dev/null 2>&1
+                logmsg "SG Delete" "$ITEM"
+            done
+            LIST=""
+            LIST=`$AWS ec2 describe-subnets --filters "Name=vpc-id,Values=$VPCID" --query "Subnets[*].SubnetId"`
+            for ITEM in $LIST; do
+                $AWS --region $REGION ec2 delete-subnet --subnet-id $ITEM
+                logmsg "Subnet Delete" "$ITEM"
+            done
+            LIST=""
+            LIST=`$AWS ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPCID" "Name=association.main,Values=false" --query "RouteTables[*].Associations[*].RouteTableAssociationId"`
+            for ITEM in $LIST; do
+                $AWSJ --region $REGION ec2 disassociate-route-table --association-id $ITEM
+                logmsg "RT Delete" "$ITEM"
+            done
+
+            LIST=""
+            $AWS ec2 delete-route-table --route-table-id $RTLIST
+            $AWSJ ec2 detach-internet-gateway --internet-gateway-id $IGWID --vpc-id $VPCID
+            $AWSJ ec2 delete-internet-gateway --internet-gateway-id $IGWID
+            $AWSJ ec2 delete-vpc --vpc-id $VPCID
+
+            LIST=`aws --profile $ACCOUNT ec2 describe-security-groups | grep $FTAG | gawk '{print $3}'`
+            for ITEM in $LIST; do
+                logmsg "Delete SG "$ITEM
+                $AWS ec2 delete-security-group --group-id $ITEM
+            done
+
+            KEYNAME=$(bib -n KEYNAME -g)
+            KEYFILE=$(bib -n KEYFILE -g)
+            logmsg "KEYNAME Delete" "$KEYNAME"
+            logmsg "KEYFILE Delete" "$PEMS/$KEYNAME.pem"
+            $AWS ec2 delete-key-pair --key-name $KEYNAME
+            rm -f "$KEYFILE"
+            rm -f "$Tmp" >/dev/null 2>&1
+            bib -n VPCID -r
+            logmsg "VPC Delete End"
+            # $AWS ec2 describe-vpcs    --query "Vpcs[*].[VpcId,CidrBlock]" | gawk -f twocol.awk
+            ;;
+        *) 
+            ;;
+    esac
+done
+shift $(($OPTIND - 1))

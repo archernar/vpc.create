@@ -1,0 +1,121 @@
+#!/bin/bash
+Tmp=/tmp/BIB$$
+trap "rm -f $Tmp" EXIT
+rm -f "$Tmp"  >/dev/null 2>&1
+
+function assert {
+    if [[ "$1" = "" ]]; then
+        echo "Error: "
+        echo "      "$2
+        exit 1
+    fi
+}
+programname=bib
+function usage {
+    echo ""
+    echo "usage: $programname [-bpgrlih] [-n name] [-v value]"
+    echo "  -b             explicitly name the bib database file"
+    echo "  -p             put a name/value pair"
+    echo "  -g             get the value of a name"
+    echo "  -r             remove a name/value pair"
+    echo "  -l             list all name/value pairs"
+    echo "  -i             initial the name/pair dataset, empty it"
+    echo "  -n <name>      specify a name"
+    echo "  -v <value>     specify a value"
+    echo "  -h             display help"
+    exit 1
+}
+
+# Notes
+# https://devconnected.com/how-to-check-if-file-or-directory-exists-in-bash/
+
+if [[ -f "./bib.db" ]]
+then
+    DBFILE="bib.db"
+else
+    if [[ -f "~/bib.db" ]]
+    then
+        DBFILE="~/bib.db"
+    else
+        echo "./bib.db or ~/bib.db not found"
+        exit 1
+    fi
+fi
+
+touch $DBFILE
+
+while getopts "b:n:v:gplrih" arg
+do
+  case $arg in
+     b) DBFILE=$OPTARG
+        touch "$DBFILE"
+        ;;
+     n) assert "$DBFILE" "bib database file not defined" 
+        NAME=$OPTARG
+        ;;
+     v) assert "$DBFILE" "bib database file not defined" 
+        VALUE=$OPTARG
+        ;;
+     g) assert "$DBFILE" "bib database file not defined" 
+        assert "$NAME"   "<name> not defined" 
+        touch "$DBFILE"
+        cat "$DBFILE" | gawk -v tmp=$Tmp -v dbfile="$DBFILE" -v n="$NAME" -v v="$VALUE" -F, ' {value[$1] = $2;}
+        END {
+            sz ="NULL"; if (n in value) sz=value[n]; print sz;
+        }'
+        ;;
+     p) assert "$DBFILE" "bib database file not defined" 
+        assert "$NAME"   "<name> not defined" 
+        assert "$VALUE"  "<value> not defined" 
+        touch "$DBFILE"
+        cat "$DBFILE" | gawk -v dbfile="$DBFILE" -v n="$NAME" -v v="$VALUE" -F, ' {value[$1] = $2;}
+        END {
+            value[n]=v;
+            OFS=","; system("rm -rf " dbfile); 
+            for (name in value) {
+                print name,value[name] >> dbfile;
+                close(dbfile); 
+            }
+        }'
+        ;;
+     l)
+        assert "$DBFILE" "bib database file not defined" 
+        echo "DBFILE is $DBFILE" 
+        touch "$DBFILE"
+        echo ""
+        if [[ -f "$DBFILE" ]]
+        then
+            cat "$DBFILE" | gawk -v dbfile="$DBFILE" -v n="$NAME" -v v="$VALUE" -F, ' {value[$1] = $2;}
+            END {
+                OFS=","; for (name in value) { print name,value[name];  }
+            }'
+        fi
+        ;;
+     r) 
+        assert "$DBFILE" "bib database file not defined" 
+        assert "$NAME"   "<name> not defined" 
+        touch "$DBFILE"
+        cat "$DBFILE" | gawk -v dbfile="$DBFILE" -v n="$NAME" -v v="$VALUE" -F, ' {value[$1] = $2;}
+        END {
+            value[n]=v;
+            OFS=","; system("rm -rf " dbfile); for (name in value) { if (n!=name) print name,value[name] >> dbfile; close(dbfile); }
+        }'
+        ;;
+     i) assert "$DBFILE" "bib database file not defined" 
+        touch "$DBFILE"
+        cat "$DBFILE" | gawk -v dbfile="$DBFILE" -v n="$NAME" -v v="$VALUE" -F, '
+        END {
+            system("rm -rf " dbfile); 
+        }'
+        ;;
+     h) usage
+        ;;
+     *) exit 0
+        ;;
+  esac
+done
+shift $(($OPTIND - 1))
+
+
+
+
